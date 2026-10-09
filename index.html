@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>納品プラン 優先化</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#6b7280; --line:#e3e6eb;
+          --accent:#e47911; --accent-d:#c4650c; --warn-bg:#fff4e5; --warn:#b45309; --ok:#15803d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; font-size:14px; }
+  header { background:#232f3e; color:#fff; padding:14px 16px; }
+  header h1 { margin:0; font-size:17px; }
+  header .sub { font-size:12px; opacity:.8; margin-top:2px; }
+  main { max-width:860px; margin:0 auto; padding:16px; }
+  .guide { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px; line-height:1.7; }
+  .guide ol { margin:4px 0 0; padding-left:20px; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .toolbar input[type=search] { flex:1; min-width:180px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+  .toolbar label { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+  button { cursor:pointer; border:0; border-radius:6px; padding:8px 14px; font-size:13px; }
+  .btn { background:var(--accent); color:#fff; font-weight:600; }
+  .btn:hover { background:var(--accent-d); }
+  .btn:disabled { background:#c9ccd1; cursor:default; }
+  .btn-sub { background:#fff; border:1px solid var(--line); color:var(--text); }
+  .count { font-size:12px; color:var(--muted); margin:6px 2px; }
+  .plan { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:8px;
+          display:flex; gap:10px; align-items:center; }
+  .plan.buried { border-left:4px solid var(--warn); }
+  .plan .body { flex:1; min-width:0; }
+  .plan .name { font-weight:600; word-break:break-all; }
+  .plan .meta { font-size:12px; color:var(--muted); margin-top:3px; }
+  .tag { display:inline-block; font-size:11px; padding:1px 6px; border-radius:10px; margin-left:6px; vertical-align:1px; }
+  .tag.buried { background:var(--warn-bg); color:var(--warn); }
+  .tag.prio { background:#e7f6ec; color:var(--ok); }
+  .msg { padding:16px; text-align:center; color:var(--muted); }
+  .toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#232f3e; color:#fff;
+           padding:10px 16px; border-radius:6px; font-size:13px; max-width:90%; display:none; }
+  .spinner { display:inline-block; width:12px; height:12px; border:2px solid #fff; border-top-color:transparent;
+             border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:4px; }
+  .msg .spinner { border-color:var(--muted); border-top-color:transparent; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (max-width:560px) { .plan { flex-direction:column; align-items:stretch; } .plan .btn { width:100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>納品プラン 優先化</h1>
+  <div class="sub" id="vendor">&nbsp;</div>
+</header>
+<main>
+  <div class="guide">
+    セラーセントラルの「編集中の納品プラン」は、最近更新された<b>30件</b>しか表示されません。
+    見当たらないプランは、ここで「優先にする」を押すと一覧の先頭に戻ります。
+    <ol>
+      <li>このページは、<b>セラーセントラルにログインしているブラウザ</b>で開いてください。</li>
+      <li>対象プランの「優先にする」を押すと、プラン名の末尾に【日付優先】が付き、そのプランの画面が新しいタブで開きます。</li>
+      <li>開いたタブでそのまま作業を進めてください。</li>
+    </ol>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" id="q" placeholder="プラン名で検索（例: 20261001、メーカー名）" oninput="render()">
+    <label><input type="checkbox" id="onlyBuried" onchange="render()"> 埋もれているプランだけ</label>
+    <button class="btn-sub" onclick="load()">再読み込み</button>
+  </div>
+  <div class="count" id="count"></div>
+  <div id="list"><div class="msg"><span class="spinner"></span>読み込み中…</div></div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+// 裏方のGAS Webアプリ（gas-fba-plan-priority / APP-023）。Googleのログイン情報を送らずに呼ぶ（credentials:'omit'）。
+// これで複数Googleアカウントでログイン中のブラウザでも開ける。
+const API = 'https://script.google.com/macros/s/AKfycbzNzV5x6a5BhdN_pLkjGIwWQhQHqWvKkX8DWo60co5SRGX-RFbD1B8Q8P2xHPu9vodGLw/exec';
+// 合言葉はURLの #k=... から読む（# より後ろはサーバーへ送られない）
+const KEY = new URLSearchParams(location.hash.slice(1)).get('k') || '';
+let plans = [];
+let visibleCount = 30;
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function toast(text) {
+  const t = document.getElementById('toast');
+  t.textContent = text; t.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.style.display = 'none'; }, 5000);
+}
+async function call(promise) {
+  let res;
+  try { res = await promise; } catch (e) { throw new Error('通信に失敗しました。時間をおいて再読み込みしてください'); }
+  let r;
+  try { r = await res.json(); } catch (e) { throw new Error('サーバーの応答を読めませんでした（' + res.status + '）'); }
+  if (!r || !r.ok) throw new Error((r && r.error) || '不明なエラー');
+  return r;
+}
+function apiList() {
+  return call(fetch(API + '?api=list&k=' + encodeURIComponent(KEY), { credentials: 'omit' }));
+}
+function apiPrioritize(id) {
+  // text/plain にして事前確認（プリフライト）なしで送る
+  return call(fetch(API, { method: 'POST', credentials: 'omit',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ k: KEY, action: 'prioritize', id: id }) }));
+}
+
+async function load() {
+  document.getElementById('list').innerHTML = '<div class="msg"><span class="spinner"></span>読み込み中…</div>';
+  document.getElementById('count').textContent = '';
+  try {
+    const r = await apiList();
+    document.getElementById('vendor').textContent = r.vendor + ' さま専用ページ';
+    plans = r.data.plans; visibleCount = r.data.visibleCount;
+    render();
+  } catch (e) {
+    document.getElementById('list').innerHTML = '<div class="msg">読み込めませんでした: ' + esc(e.message) + '</div>';
+  }
+}
+
+function render() {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const onlyBuried = document.getElementById('onlyBuried').checked;
+  // 更新が新しい順（セラーセントラルの一覧と同じ並び）
+  const rows = plans
+    .filter(p => !q || p.name.toLowerCase().includes(q))
+    .filter(p => !onlyBuried || p.rank > visibleCount)
+    .sort((a, b) => a.rank - b.rank);
+  const buried = plans.filter(p => p.rank > visibleCount).length;
+  document.getElementById('count').textContent =
+    '作成済みプラン ' + plans.length + '件（うち一覧に出ていない目安 ' + buried + '件）／表示 ' + rows.length + '件・更新が新しい順';
+  if (!rows.length) {
+    document.getElementById('list').innerHTML = '<div class="msg">該当するプランはありません</div>';
+    return;
+  }
+  document.getElementById('list').innerHTML = rows.map(p => {
+    const isBuried = p.rank > visibleCount;
+    const isPrio = /【\d{8}優先】\s*$/.test(p.name);
+    return '<div class="plan' + (isBuried ? ' buried' : '') + '">' +
+      '<div class="body"><div class="name">' + esc(p.name) +
+        (isBuried ? '<span class="tag buried">一覧に出ていない</span>' : '') +
+        (isPrio ? '<span class="tag prio">優先済み</span>' : '') + '</div>' +
+      '<div class="meta">作成 ' + esc(p.created) + '　最終更新 ' + esc(p.updated) +
+        '　一覧の目安 ' + p.rank + '番目</div></div>' +
+      '<button class="btn" data-id="' + esc(p.id) + '" onclick="prioritize(this)">優先にする</button></div>';
+  }).join('');
+}
+
+async function prioritize(btn) {
+  const id = btn.getAttribute('data-id');
+  const plan = plans.find(p => p.id === id);
+  if (!plan) return;
+  if (!confirm('「' + plan.name + '」を優先にします。\nプラン名の末尾に【今日の日付＋優先】が付き、このプランの画面が新しいタブで開きます。よろしいですか？')) return;
+  // ポップアップブロック回避のため、クリック直後（awaitの前）にタブを開く
+  window.open('https://sellercentral.amazon.co.jp/fba/sendtoamazon?wf=' + encodeURIComponent(id), '_blank');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>更新中…';
+  try {
+    const r = await apiPrioritize(id);
+    toast('優先にしました: ' + r.data.newName);
+    await load();
+  } catch (e) {
+    toast('名前の更新に失敗しました（プランの画面は開いています）: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '優先にする';
+  }
+}
+
+if (!KEY) {
+  document.getElementById('list').innerHTML = '<div class="msg">お渡ししたURLをそのまま開いてください。</div>';
+} else {
+  load();
+}
+</script>
+</body>
+</html>
